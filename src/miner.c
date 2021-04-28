@@ -1,10 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+
 #include "miner.h"
 
 #define PRIME 99997669
 #define BIG_X 435679812
 #define BIG_Y 100001819
+
 
 long int simple_hash(long int number) {
     long int result = (number * BIG_X + BIG_Y) % PRIME;
@@ -23,6 +32,35 @@ void print_blocks(Block *plast_block, int num_wallets) {
         printf("\n\n\n");
     }
     printf("A total of %d blocks were printed\n", i);
+}
+
+int open_shmemory(){
+    int fd;
+    if((fd = shm_open(SHM_NAME_NET, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR)) == -1){
+        if(errno == EEXIST){
+            fd = shm_open(SHM_NAME_NET, O_RDWR, 0);
+            if(fd == -1){
+                perror("open_shmemory(existing)");
+                return ERR;
+            }
+            else{
+                return fd;
+            }
+        }
+        else{
+            perror("open_shmemory(non_existing)");
+            return ERR;
+        }
+    }
+    else{
+        if(ftruncate(fd, sizeof(NetData)) == -1){
+            perror("ftruncate");
+            shm_unlink(SHM_NAME_NET);
+            close(fd);
+            return ERR;
+        }
+        return fd;
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -45,3 +83,5 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "\nSearch failed\n");
     exit(EXIT_FAILURE);
 }
+
+

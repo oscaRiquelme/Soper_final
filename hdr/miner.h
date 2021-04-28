@@ -8,6 +8,7 @@
 #define SHM_NAME_BLOCK "/block"
 
 #define MAX_MINERS 200
+#define ERR -1
 
 typedef struct _Block {
     int wallets[MAX_MINERS];
