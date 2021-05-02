@@ -1,3 +1,6 @@
+#ifndef MINER_H
+#define MINER_H
+
 #include <unistd.h>
 #include <sys/types.h>
 
@@ -32,3 +35,5 @@ typedef struct _NetData {
 long int simple_hash(long int number);
 
 void print_blocks(Block * plast_block, int num_wallets);
+
+#endif

@@ -7,8 +7,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
 #include <pthread.h>
-
+#include <sys/wait.h>
+#include <semaphore.h>
 
 #include "miner.h"
 
@@ -19,11 +21,14 @@
 typedef struct _workerInfo {
     int target; /*Target to be found in the pow*/
     int numWorkers; /*argv[1]*/
-    int numThread;/*Identifier comprehended betweeen 1 and argv[2]*/
-    int solution;
+    int numThread; /*Identifier comprehended betweeen 1 and argv[2]*/
+    int solution; /*Variable in which de solution will be returned if found*/
+    pid_t miners[MAX_MINERS]; /*Miner's pid that will be notified*/
+    int numMiners;
 } WorkerInfo;
 
-static volatile int solution_found;
+static volatile int solution_found = 0;
+static volatile int sigusr2_received = 0;
 
 long int simple_hash(long int number) {
     long int result = (number * BIG_X + BIG_Y) % PRIME;
@@ -102,22 +107,36 @@ void* worker(void* args){
             if(pow->target == simple_hash(i)){
                 solution_found = 1;
                 pow->solution = i;
+                
+                // for(i = 0; i < pow->numMiners; i++){
+                //     if(getpid() != pow->miners[i])
+                //         if(kill(pow->miners[i], SIGUSR2)){
+                //             perror("kill_sigusr2");
+                //             /*PROBABLEMENTE TENGA QUE LIBERAR MEMORIA Y CERRAR COSAS*/
+                //             exit(EXIT_FAILURE);
+                //         }
+                // }
                 pthread_exit(pow);
             }
         }
-        return NULL;
+        pthread_exit(NULL);
+}
+
+void sigusr2_handler(int signal){
+    sigusr2_received = 1;
 }
 
 int main(int argc, char *argv[]) {
     long int i;
-    int solution;
+    int solution, roundCounter = 0, maxRounds;
     pthread_t workers[MAX_WORKERS];
     short numWorkers;
     WorkerInfo info[MAX_WORKERS];
+    struct sigaction action;
 
     
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <NUM_WORKERS>\n", argv[0]);
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <NUM_WORKERS> <MAX_ROUNDS>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
@@ -126,24 +145,48 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Manito ponme al menos 1 trabajador y no mas de 10\n");
         exit(EXIT_FAILURE);
     }
+    maxRounds = atoi(argv[2]);
+    if(maxRounds <= 0){
+        fprintf(stderr, "Manito como va a hacer cero rondas o menos???\n");
+        exit(EXIT_FAILURE);
+    }
 
-    for (i = 0; i < numWorkers; i++){
-        info[i].numWorkers = numWorkers;
-        info[i].target = 1000;
-        info[i].solution = -1;
-        info[i].numThread = i;
-        if(pthread_create(&workers[i], NULL, worker, &info[i]) != 0){
-            fprintf(stderr, "Manito fracase creando hilos...\n");
-            exit(EXIT_FAILURE);
+    action.sa_handler = sigusr2_handler;
+    sigemptyset(&(action.sa_mask));
+    action.sa_flags = 0;
+
+    if(sigaction(SIGUSR2, &action, NULL) < 0){
+        perror("sigaction: ");
+        exit(EXIT_FAILURE);
+    }
+
+    /*ESTA MAAAAAAAAAAAAAAAAAAAAAL, no deberiamos de copiar 25 veces la misma info, deberiamos de pasarle punteros a bloques y tal*/
+    while(roundCounter < maxRounds){
+        /*se prepara una ronda*/
+        
+        /*carga la info de cada trabajador*/
+        /*lanza el número de trabajadores especificados*/
+        for (i = 0; i < numWorkers; i++){
+            info[i].numWorkers = numWorkers;
+            info[i].target = 1000;
+            info[i].solution = -1;
+            info[i].numThread = i;
+            if(pthread_create(&workers[i], NULL, worker, &info[i]) != 0){
+                fprintf(stderr, "Manito fracase creando hilos...\n");
+                exit(EXIT_FAILURE);
+            }
         }
+        
+        for(i = 0; i < numWorkers; i++){
+            pthread_join(workers[1], NULL);
+            if(info[i].solution != -1 ) solution = info[i].solution;
+        }
+
+        roundCounter++;
+        fprintf(stdout, "Solucion: %d\n", solution);
     }
 
-    for(i = 0; i < numWorkers; i++){
-        pthread_join(workers[i], NULL);
-        if(info[i].solution != -1 ) solution = info[i].solution;
-    }
-
-    fprintf(stdout, "Solucion: %d\n", solution);
+    fprintf(stdout, "Max rounds reached manito\n");
     exit(EXIT_SUCCESS); 
         
     
