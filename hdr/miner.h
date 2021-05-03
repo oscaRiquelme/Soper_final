@@ -21,6 +21,8 @@ typedef struct _Block {
     int id;
     int is_valid;
     sem_t blockShMemory_mutex;
+    sem_t solution_mutex;
+    short solution_found;
     struct _Block *next;
     struct _Block *prev;
 } Block;
