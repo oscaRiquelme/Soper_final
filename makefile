@@ -13,3 +13,6 @@ clean:
 	@echo "Cleaning up files..."
 	rm -f miner 
 
+restart_mem:
+	rm /dev/shm/netdata /dev/shm/block
+

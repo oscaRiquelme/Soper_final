@@ -12,6 +12,7 @@
 
 #define MAX_MINERS 200
 #define ERR -1
+#define OK 0
 
 typedef struct _Block {
     int wallets[MAX_MINERS];
@@ -30,7 +31,8 @@ typedef struct _NetData {
     int total_miners;
     pid_t monitor_pid;
     pid_t last_winner;
-} NetData;
+    sem_t netShMemory_mutex;
+} NetData; 
 
 long int simple_hash(long int number);
 
