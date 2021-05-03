@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <sys/wait.h>
 #include <semaphore.h>
+#include <time.h>
 
 #include "miner.h"
 
@@ -176,6 +177,11 @@ Block* open_blockChainMemory(){
             return NULL;
         }
         close(fd);
+        if(sem_init(&shBlock->blockShMemory_mutex, 1, 1) == -1){
+            perror("block semInit");
+            munmap(shBlock, sizeof(Block));
+            return NULL;
+        }
         for(i = 0; i < MAX_MINERS; i++){ /*If  the blockchain is the first blockchain of the chain*/
             shBlock->wallets[i] = 0; 
         }
@@ -282,15 +288,23 @@ int main(int argc, char *argv[]) {
     shBlock = open_blockChainMemory();
     if(!shBlock){
         fprintf(stderr, "Fracase abriendo o creando la red manito\n");
+        munmap(net, sizeof(NetData));
         exit(EXIT_FAILURE);
     }
     
-    /*TODO: funcion de apuntarse*/
-    signUp(net);
-    fprintf(stdout, "Soy %d y me he apuntado a la lista de mineros\n", getpid());
-    printf("\nImprimiendo lista de mineros...\n");
-    for(i = 0; i < net->total_miners; i++){
-        fprintf(stdout, "[%ld]: %d\n", i, net->miners_pid[i]);
+    if(signUp(net) == ERR){
+        fprintf(stderr, "Failed to register miner %d\n", getpid());
+        munmap(net, sizeof(NetData));
+        munmap(shBlock, sizeof(Block));
+    }
+
+    if(isFirst){
+        srand(time(NULL));
+        sem_wait(&shBlock->blockShMemory_mutex);
+        shBlock->id = 0;
+        shBlock->prev = NULL;
+        shBlock->target = rand();
+        sem_post(&shBlock->blockShMemory_mutex);  
     }
     
     /*ESTA MAAAAAAAAAAAAAAAAAAAAAL, no deberiamos de copiar 25 veces la misma info, deberiamos de pasarle punteros a bloques y tal*/

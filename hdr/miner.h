@@ -20,6 +20,7 @@ typedef struct _Block {
     long int solution;
     int id;
     int is_valid;
+    sem_t blockShMemory_mutex;
     struct _Block *next;
     struct _Block *prev;
 } Block;
