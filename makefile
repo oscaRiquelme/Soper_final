@@ -14,5 +14,5 @@ clean:
 	rm -f miner 
 
 memClean:
-	rm /dev/shm/netdata /dev/shm/block
+	rm /dev/shm/netdata /dev/shm/block /dev/mqueue/minerQueue
 

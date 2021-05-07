@@ -9,10 +9,14 @@
 
 #define SHM_NAME_NET "/netdata"
 #define SHM_NAME_BLOCK "/block"
+#define MQ_MINERS "/minerQueue"
 
 #define MAX_MINERS 200
 #define ERR -1
 #define OK 0
+
+#define VALID_VOTE '1'
+#define INVALID_VOTE '0'
 
 typedef struct _Block {
     int wallets[MAX_MINERS];
@@ -29,12 +33,15 @@ typedef struct _Block {
 
 typedef struct _NetData {
     pid_t miners_pid[MAX_MINERS];
+    pid_t waiting_list[MAX_MINERS];
+    short numWaiting_list;
     char voting_pool[MAX_MINERS];
     int last_miner;
     int total_miners;
     pid_t monitor_pid;
     pid_t last_winner;
     sem_t netShMemory_mutex;
+    short roundInProgress;
 } NetData; 
 
 long int simple_hash(long int number);
