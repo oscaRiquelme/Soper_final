@@ -4,14 +4,16 @@ THR_L=-lpthread
 RT_L=-lrt
 FLAGS = -Wall -pedantic -g -I $(HDR)
 
-all: miner 
+all: miner monitor
 	
 miner: 
 	gcc -g -o miner $(FLAGS) $(SRC)miner.c $(THR_L) $(RT_L)
-#Borrar objetos
+monitor:
+	gcc -g -o monitor $(FLAGS) $(SRC)monitor.c $(RT_L)
 clean:
 	@echo "Cleaning up files..."
 	rm -f miner 
+	rm -f monitor
 
 memClean:
 	rm /dev/shm/netdata /dev/shm/block /dev/mqueue/minerQueue
