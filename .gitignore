@@ -2,3 +2,4 @@ miner
 hash
 hash.c
 pruebas
+printBlock*

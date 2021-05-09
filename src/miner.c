@@ -34,11 +34,13 @@ static volatile int sigusr1_received = 0;
 NetData* open_netShmemory(short * isFirst);
 NetData* map_netShmemory(int fd);
 sigset_t proc_handlers();
-Block* open_blockChainMemory();
+Block* open_sharedBlockMemory();
 Block* map_blockShmemory(int fd);
 void* worker(void* args);
 void sigusr_handler(int signal);
 int signUp(NetData * net);
+Block * updateBlock(Block *shBlock);
+/******************************************************************/
 
 
 long int simple_hash(long int number) {
@@ -105,6 +107,16 @@ NetData* open_netShmemory(short * isFirst){
             munmap(net, sizeof(NetData));
             return NULL;
         }
+        if(sem_init(&net->blockShMemory_mutex, 1, 1) == -1){
+            perror("block semInit w_mutex");
+            munmap(net, sizeof(Block));
+            return NULL;
+        }
+        if(sem_init(&net->solution_mutex, 1, 1) == -1){
+            perror("block semInit solution");
+            munmap(net, sizeof(NetData));
+            return NULL;
+        }
         sem_wait(&net->netShMemory_mutex);
         net->roundInProgress = 0;
         net->total_miners = 0;
@@ -125,7 +137,6 @@ NetData* map_netShmemory(int fd){
     }
     return data;
 }
-
 /*TODO: exit failures no me gusta, quizas una variable por referencia para cde*/
 sigset_t proc_handlers(){
 
@@ -159,7 +170,7 @@ sigset_t proc_handlers(){
     return oldmask;
 }
 
-Block* open_blockChainMemory(){
+Block* open_sharedBlockMemory(){
 
     Block * shBlock;
 
@@ -173,12 +184,7 @@ Block* open_blockChainMemory(){
                 return NULL;
             }
             else{
-                shBlock = map_blockShmemory(fd);
-                if(!shBlock){
-                    fprintf(stderr, "Failed to map the shared block\n");
-                    return NULL;
-                }
-                close(fd);
+                shBlock = updateBlock(NULL);
                 return shBlock;
             }
         }
@@ -200,19 +206,11 @@ Block* open_blockChainMemory(){
             return NULL;
         }
         close(fd);
-        if(sem_init(&shBlock->blockShMemory_mutex, 1, 1) == -1){
-            perror("block semInit w_mutex");
-            munmap(shBlock, sizeof(Block));
-            return NULL;
-        }
-        if(sem_init(&shBlock->solution_mutex, 1, 1) == -1){
-            perror("block semInit solution");
-            munmap(shBlock, sizeof(Block));
-            return NULL;
-        }
         for(i = 0; i < MAX_MINERS; i++){ /*If  the blockchain is the first blockchain of the chain*/
             shBlock->wallets[i] = 0; 
         }
+        shBlock->id = 1;
+
         return shBlock;
     }
 }
@@ -242,7 +240,7 @@ void* worker(void* args){
         
         for(i = iniInterval; i < iniInterval+intervalSize && pow->currentBlock->solution_found == 0 && !sigusr2_received; i++){
             if(pow->currentBlock->target == simple_hash(i)){
-                sem_wait(&pow->currentBlock->solution_mutex);
+                sem_wait(&pow->net->solution_mutex);
                 if(pow->currentBlock->solution_found == 0){
                     pow->currentBlock->solution_found = 1;
                     pow->currentBlock->solution = i;
@@ -266,7 +264,7 @@ void* worker(void* args){
                         } 
                     }
                 }
-                sem_post(&pow->currentBlock->solution_mutex);
+                sem_post(&pow->net->solution_mutex);
                 pthread_exit(pow);
             }
         }
@@ -348,6 +346,92 @@ int notifyActiveMiners(NetData * net, int *array){
     return activeMiners;
 }
 
+Block * addBlockToBlockchain(Block *shBlock, NetData *net){
+    /*conseguir la info del fichero*/
+    /*truncarlo a su tamaño más el tamaño de un bloque nuevo*/
+    /*setear prev y next y tal*/
+
+    int fd;
+    int i, j;
+    struct stat statbuf;
+    
+    if((fd = shm_open(SHM_NAME_BLOCK, O_RDWR, 0)) == -1){
+       perror("addBlock ShmOpen");
+       return NULL;
+    }
+    else{
+        if(fstat(fd, &statbuf)){
+            perror("fstat");
+            close(fd);
+        }
+        munmap(shBlock, statbuf.st_size);
+        if(ftruncate(fd, sizeof(Block) + statbuf.st_size) == -1){
+                perror("ftruncate");
+                exit(EXIT_FAILURE);
+        }
+        if ((shBlock = (Block*)mmap(NULL, sizeof(Block) + statbuf.st_size , PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+                perror("mmap");
+                exit(EXIT_FAILURE);
+        }
+        i = statbuf.st_size/sizeof(Block);
+        close(fd);
+
+        sem_wait(&net->blockShMemory_mutex);
+        shBlock[i].id = shBlock[i-1].id+1;
+        shBlock[i].target = shBlock[i-1].solution;
+        shBlock[i].prev = &shBlock[i-1];
+        shBlock[i].next = NULL;
+        shBlock[i-1].next = &shBlock[i];
+        shBlock[i].solution_found = 0;
+        for(j = 0; j < net->total_miners; j++) shBlock[i].wallets[j] = shBlock[i-1].wallets[j];
+        sem_post(&net->blockShMemory_mutex);
+
+        return &shBlock[i];
+    }
+
+}
+
+Block * updateBlock(Block *shBlock){
+    
+    int fd, i;
+    struct stat statbuf;
+
+    if((fd = shm_open(SHM_NAME_BLOCK, O_RDWR, 0)) == -1){
+       perror("updateBlock ShmOpen");
+       return NULL;
+    }
+    else{
+        if(fstat(fd, &statbuf)){
+            perror("fstat");
+            close(fd);
+        }
+        if (shBlock) munmap(shBlock, statbuf.st_size);
+
+        if ((shBlock = (Block*)mmap(NULL, statbuf.st_size , PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+                perror("mmap");
+                exit(EXIT_FAILURE);
+        }
+        i = statbuf.st_size/sizeof(Block);
+        close(fd);
+        
+        return &shBlock[i-1];
+    }
+}
+
+void addCoin(NetData *net, Block * shBlock){
+    int i;
+
+    for(i = 0; i < net->total_miners; i++){
+        if(getpid() == net->miners_pid[i]){
+            sem_wait(&net->blockShMemory_mutex);
+            shBlock->wallets[i]++;
+            sem_post(&net->blockShMemory_mutex);
+            return;
+        }  
+    }
+
+}
+
 int main(int argc, char *argv[]) {
     int i;
     int aux;
@@ -359,7 +443,6 @@ int main(int argc, char *argv[]) {
     NetData *net; 
     Block *shBlock;
     sigset_t emptyMask;
-    sem_t globalVarMutex;
     mqd_t minersQueue;
     struct mq_attr attributes = {
         .mq_flags = 0,
@@ -367,7 +450,7 @@ int main(int argc, char *argv[]) {
         .mq_curmsgs = 0,
         .mq_msgsize = sizeof(int)
     };
-   
+
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <NUM_WORKERS> <MAX_ROUNDS>\n", argv[0]);
         exit(EXIT_FAILURE);
@@ -386,12 +469,8 @@ int main(int argc, char *argv[]) {
 
     /*Procs signal handlers*/
     emptyMask = proc_handlers();
-    /*TODO: esto vale para algo?? */
-    if(sem_init(&globalVarMutex, 0, 1)){
-        perror("globalVarMutex sem_init");
-        exit(EXIT_FAILURE);
-    }
 
+    /*opens a queue to comunicate with other miners*/
     minersQueue = mq_open(MQ_MINERS, O_CREAT | O_RDWR , S_IRUSR | S_IWUSR, &attributes);
     if(minersQueue == (mqd_t)-1) {
         perror("minersQueue");
@@ -404,21 +483,11 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to open the shared net\n");
         exit(EXIT_FAILURE);
     }
-    /*opens and maps the blockchain*/
-    shBlock = open_blockChainMemory();
-    if(!shBlock){
-        fprintf(stderr, "Failed to open the shared block\n");
-        munmap(net, sizeof(NetData));
-        exit(EXIT_FAILURE);
-    }
-    
     printf("Registering miner %d...\n", getpid());
     sleep(2);
-    
     if(signUp(net) == ERR){
         fprintf(stderr, "Failed to register miner %d\n", getpid());
         munmap(net, sizeof(NetData));
-        munmap(shBlock, sizeof(Block));
     }
     printf("Miner registered.\n");
     printf("Printing miners pid list...\n");
@@ -426,17 +495,27 @@ int main(int argc, char *argv[]) {
         printf("%d\n", net->miners_pid[i]);
     }
     sleep(2);
+
+    /*opens and maps the shared block*/
+    shBlock = open_sharedBlockMemory();
+    if(!shBlock){
+        fprintf(stderr, "Failed to open the shared block\n");
+        munmap(net, sizeof(NetData));
+        exit(EXIT_FAILURE);
+    }
+    
+    
     if(isFirst){
         printf("The miner %d is the first in the net. Creating first block with random target...\n", getpid());
         sleep(2);
         srand(time(NULL));
 
-        sem_wait(&shBlock->blockShMemory_mutex);
+        sem_wait(&net->blockShMemory_mutex);
         shBlock->id = 0;
         shBlock->prev = NULL;
         shBlock->target = rand()%PRIME;
         printf("Random target: %ld\n", shBlock->target);
-        sem_post(&shBlock->blockShMemory_mutex);  
+        sem_post(&net->blockShMemory_mutex);  
     }
     
 
@@ -455,9 +534,7 @@ int main(int argc, char *argv[]) {
         /*lanza el número de trabajadores especificados*/
         sigusr2_received = 0;
         sigusr1_received = 0;
-        sem_wait(&shBlock->blockShMemory_mutex);
-        shBlock->solution_found = 0;
-        sem_post(&shBlock->blockShMemory_mutex);
+
 
         printf("Sending workers to mine the solution...\n");
         sleep(2);
@@ -529,16 +606,21 @@ int main(int argc, char *argv[]) {
 
         /*Decide si el bloque es valido o no*/   
         /****************************************************************************************************/    
-            if(numVotes >= (activeMiners - 1)/2 + 1){
-                sem_wait(&shBlock->blockShMemory_mutex);
+            if(numVotes >= (activeMiners - 1)/2){
+                sem_wait(&net->blockShMemory_mutex);
                 shBlock->is_valid = 1;
-                sem_post(&shBlock->blockShMemory_mutex);
-                printf("Block is valid\n");
+                printf("Validated block:\nId: %d\nTarget: %ld\nSolution: %ld\nPrev(&): %p\n", 
+                        shBlock->id, shBlock->target, shBlock->solution, (void*)shBlock->prev);
+                sem_post(&net->blockShMemory_mutex);
+                addCoin(net, shBlock); 
+                shBlock = addBlockToBlockchain(shBlock, net);
+                printf("New block:\nId: %d\nTarget: %ld\nPrev(&): %p\n", 
+                        shBlock->id, shBlock->target, (void*)shBlock->prev);
             }
             else{
-                sem_wait(&shBlock->blockShMemory_mutex);
+                sem_wait(&net->blockShMemory_mutex);
                 shBlock->is_valid = 0;
-                sem_post(&shBlock->blockShMemory_mutex);
+                sem_post(&net->blockShMemory_mutex);
                 printf("Block is not valid\n");
             }
             sleep(2);
@@ -552,7 +634,7 @@ int main(int argc, char *argv[]) {
         /****************************************************************************************************/
         
 
-        /*Setea las variables pertinentes aunque algunas no se pa que*/
+        /*Avisa a los que estaban en lista de espera que ya acabo la ronda,*/
         /****************************************************************************************************/
             sem_wait(&net->netShMemory_mutex);
             net->last_winner = getpid();
@@ -565,7 +647,6 @@ int main(int argc, char *argv[]) {
             for(i = 0; i < net->numWaiting_list; i++){
                 sigusr1_received = 0; 
                 while(!sigusr1_received){
-                    printf("Bloqueado\n");
                     sigsuspend(&emptyMask);
                 } 
             }
@@ -607,7 +688,8 @@ int main(int argc, char *argv[]) {
             while(!sigusr1_received) sigsuspend(&emptyMask); /*esperan a que el ganador comunica si el bloque es valido*/
             sigusr1_received = 0;
             if(shBlock->is_valid){
-                /*TODO: añadir al blockchain de cada minero el bloque creado*/    
+                /*TODO: añadir al blockchain de cada minero el bloque creado*/
+                shBlock = updateBlock(shBlock);    
                 printf("The block is valid!\n");
             }
         /****************************************************************************************************/

@@ -9,6 +9,7 @@
 
 #define SHM_NAME_NET "/netdata"
 #define SHM_NAME_BLOCK "/block"
+#define SHM_NAME_BLOCKCHAIN "/blockchain"
 #define MQ_MINERS "/minerQueue"
 
 #define MAX_MINERS 200
@@ -24,14 +25,14 @@ typedef struct _Block {
     long int solution;
     int id;
     int is_valid;
-    sem_t blockShMemory_mutex;
-    sem_t solution_mutex;
     short solution_found;
     struct _Block *next;
     struct _Block *prev;
 } Block;
 
 typedef struct _NetData {
+    sem_t blockShMemory_mutex;
+    sem_t solution_mutex;
     pid_t miners_pid[MAX_MINERS];
     pid_t waiting_list[MAX_MINERS];
     short numWaiting_list;
