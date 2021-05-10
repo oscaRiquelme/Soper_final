@@ -3,6 +3,8 @@
         "types.h": "c",
         "stdio.h": "c",
         "miner.h": "c",
-        "stdlib.h": "c"
+        "stdlib.h": "c",
+        "unistd.h": "c",
+        "monitor.h": "c"
     }
 }

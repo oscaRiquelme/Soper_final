@@ -12,6 +12,7 @@
 #define SHM_NAME_BLOCKCHAIN "/blockchain"
 #define MQ_MINERS "/minerQueue"
 
+
 #define MAX_MINERS 200
 #define ERR -1
 #define OK 0

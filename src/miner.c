@@ -13,12 +13,16 @@
 #include <semaphore.h>
 #include <time.h>
 #include <mqueue.h>
+#include <string.h>
 
 #include "miner.h"
+#include "monitor.h"
 
 #define PRIME 99997669
 #define BIG_X 435679812
 #define BIG_Y 100001819
+
+#define MAX_BLOCKS 200
 
 typedef struct _workerInfo {
     int numWorkers; /*argv[1]*/
@@ -29,6 +33,7 @@ typedef struct _workerInfo {
 
 static volatile int sigusr2_received = 0;
 static volatile int sigusr1_received = 0;
+static volatile int sigint_received = 0;
 
 /************************PRIVATE*HEADERS****************************/
 NetData* open_netShmemory(short * isFirst);
@@ -41,6 +46,7 @@ void sigusr_handler(int signal);
 int signUp(NetData * net);
 Block * updateBlock(Block *shBlock);
 /******************************************************************/
+
 
 
 long int simple_hash(long int number) {
@@ -75,12 +81,11 @@ NetData* open_netShmemory(short * isFirst){
             }
             else{
                 net = map_netShmemory(fd);
+                close(fd);
                 if(!net){
-                    close(fd);
                     fprintf(stderr, "Failed to map the net\n");
                     return NULL;
                 }
-                close(fd);
                 return net;
             }
         }
@@ -96,12 +101,11 @@ NetData* open_netShmemory(short * isFirst){
             return NULL;
         }
         net = map_netShmemory(fd);
+        close(fd);
         if(!net){
             fprintf(stderr, "Failed to map the net\n");
-            close(fd);
             return NULL;
         }
-        close(fd);
         if(sem_init(&net->netShMemory_mutex, 1, 1)){
             perror("net SemInit");
             munmap(net, sizeof(NetData));
@@ -121,6 +125,7 @@ NetData* open_netShmemory(short * isFirst){
         net->roundInProgress = 0;
         net->total_miners = 0;
         net->numWaiting_list = 0;
+        net->monitor_pid = NO_MONITOR;
         sem_post(&net->netShMemory_mutex);
         if(isFirst) *isFirst = 1;
         return net;
@@ -137,7 +142,7 @@ NetData* map_netShmemory(int fd){
     }
     return data;
 }
-/*TODO: exit failures no me gusta, quizas una variable por referencia para cde*/
+
 sigset_t proc_handlers(){
 
     struct sigaction action;
@@ -155,6 +160,11 @@ sigset_t proc_handlers(){
         perror("sigaction");
         exit(EXIT_FAILURE);
     }
+    /*sigint no necesita ser bloqueada porque no la esperaremos en ningun momento con sigsuspend*/
+    if(sigaction(SIGINT, &action, NULL) < 0){
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
 
     sigemptyset(&mask);
     if(sigaddset(&mask, SIGUSR2) < 0){
@@ -162,7 +172,7 @@ sigset_t proc_handlers(){
         exit(EXIT_FAILURE);
     }
     if(sigaddset(&mask, SIGUSR1) < 0){
-        perror("Sigaddset sigusr2");
+        perror("Sigaddset sigusr1");
         exit(EXIT_FAILURE);
     }
     sigprocmask (SIG_BLOCK, &mask, &oldmask);
@@ -215,6 +225,27 @@ Block* open_sharedBlockMemory(){
     }
 }
 
+void reverse(char s[])
+ {
+     int i, j;
+     char c;
+    /*Da la vuelta a la cadena pasada por referencia*/
+     for (i = 0, j = strlen(s)-1; i<j; i++, j--) {
+         c = s[i];
+         s[i] = s[j];
+         s[j] = c;
+     }
+}  
+
+void intToAscii(int n, char s[]){
+     int i=0;
+     do { 
+         s[i++] = n%10 + '0'; 
+     }while((n /= 10) > 0);     
+     s[i] = '\0';
+     reverse(s);
+}  
+
 Block* map_blockShmemory(int fd){
 
     Block* data = NULL;
@@ -252,47 +283,73 @@ void* worker(void* args){
                     for(i = 0; i < pow->net->total_miners; i++){
                         if(getpid() != pow->net->miners_pid[i]){
                             if(kill(pow->net->miners_pid[i], SIGUSR2)){
-                                perror("kill_sigusr2");
-                                /*PROBABLEMENTE TENGA QUE LIBERAR MEMORIA Y CERRAR COSAS*/
+                                if(errno != ESRCH){
+                                    /*no retorna porque el error no es crítico*/
+                                    perror("kill_sigusr2_byWorker");
+                                }
                             }
                         }
                         else{
                             if(kill(pow->net->miners_pid[i], SIGUSR1)){
-                                perror("kill_sigusr1");
-                                /*PROBABLEMENTE TENGA QUE LIBERAR MEMORIA Y CERRAR COSAS*/
+                                if(errno != ESRCH){
+                                    /*no retorna porque el error no es crítico*/
+                                    perror("kill_sigusr1_byWorker");
+                                }
                             }
                         } 
                     }
                 }
                 sem_post(&pow->net->solution_mutex);
-                pthread_exit(pow);
+                pthread_exit(NULL);
             }
         }
         pthread_exit(NULL);
 }
 
+void blocksigint(){
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+}
+
+void unblocksigint(){
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+}
+
 void sigusr_handler(int signal){
     if(signal == SIGUSR2) sigusr2_received = 1;
     if(signal == SIGUSR1) sigusr1_received = 1;
+    if(signal == SIGINT) sigint_received = 1;
 }
 
 int signUp(NetData * net){
     sigset_t emptyMask;
 
+    /*Crea un set vacio para bloquear todas las señales*/
     sigemptyset(&emptyMask);
+    /*Si ya se han lanzado el maximo de mineros retorna*/
     if(net->total_miners == MAX_MINERS){
+        printf("Max miners reached\n");
         return ERR;
     }
 
-    if(net->total_miners > 0){
+    /*En caso de que no sea el primer minero, puede ser que haya una ronda en curso*/
+    if(net->total_miners > 0 && net->roundInProgress){
 
         sem_wait(&net->netShMemory_mutex);
+        /*se apunta a la lista de espera*/
         net->waiting_list[net->numWaiting_list] = getpid();
         net->numWaiting_list++;
         sem_post(&net->netShMemory_mutex);
+        /*Espera a que llegue una señal del ganador de la ronda para registrarse*/
         while(net->roundInProgress) sigsuspend(&emptyMask);
         kill(net->last_winner, SIGUSR1);
     } 
+    /*Se apunta a la lista de mineros */
     sem_wait(&net->netShMemory_mutex);
     net->miners_pid[net->total_miners] = getpid();
     (net->total_miners)++;
@@ -306,10 +363,13 @@ void vote(NetData * net, Block * shBlock){
     int i;
     int pos_found = 0;
 
+    /*Encuentra la posicion del minero que votara*/
     for(i = 0; i < net->total_miners && !pos_found; i++){
         if(net->miners_pid[i] == getpid()) pos_found = 1; 
     }
+    i--;
 
+    /*Vota en consecuencia del retorno de simple_hash*/
     if(simple_hash(shBlock->solution) == shBlock->target){
         sem_wait(&net->netShMemory_mutex);
         net->voting_pool[i] = VALID_VOTE;
@@ -322,6 +382,7 @@ void vote(NetData * net, Block * shBlock){
     }
 }
 
+/*guarda en array las posiciones en el array de los mineros activos y retorna el tamaño de dicho array*/
 int notifyActiveMiners(NetData * net, int *array){
     int i, activeMiners = 0, j = 0;
     int * aux, activeMinersPos[MAX_MINERS];
@@ -330,6 +391,7 @@ int notifyActiveMiners(NetData * net, int *array){
 
     for(i = 0; i < net->total_miners; i++){
         if(net->miners_pid[i] != getpid()){
+            /*No controla el retorno de kill porque no es un fallo critico para el funcionamiento del programa*/
             if(!kill(net->miners_pid[i], SIGUSR1)){
                 aux[j] = i;
                 j++;
@@ -340,16 +402,12 @@ int notifyActiveMiners(NetData * net, int *array){
             aux[j] = i;
             j++;
             activeMiners++;
-        } 
-        //else if(errno != ESRCH) return -1;
+        }
     }
     return activeMiners;
 }
 
 Block * addBlockToBlockchain(Block *shBlock, NetData *net){
-    /*conseguir la info del fichero*/
-    /*truncarlo a su tamaño más el tamaño de un bloque nuevo*/
-    /*setear prev y next y tal*/
 
     int fd;
     int i, j;
@@ -364,18 +422,23 @@ Block * addBlockToBlockchain(Block *shBlock, NetData *net){
             perror("fstat");
             close(fd);
         }
+        /*Borra el mapeado hecho previamente*/
         munmap(shBlock, statbuf.st_size);
+        /*Trunca el tamaño del fichero al anterior mas un bloque nuevo*/
         if(ftruncate(fd, sizeof(Block) + statbuf.st_size) == -1){
                 perror("ftruncate");
-                exit(EXIT_FAILURE);
+                close(fd);
+                return NULL;
         }
         if ((shBlock = (Block*)mmap(NULL, sizeof(Block) + statbuf.st_size , PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+                close(fd);
                 perror("mmap");
-                exit(EXIT_FAILURE);
+                return NULL;
         }
-        i = statbuf.st_size/sizeof(Block);
+        i = statbuf.st_size/sizeof(Block); /*Consigue la posición del nuevo bloque*/
         close(fd);
 
+        /*Setea los campos del nuevo bloque*/
         sem_wait(&net->blockShMemory_mutex);
         shBlock[i].id = shBlock[i-1].id+1;
         shBlock[i].target = shBlock[i-1].solution;
@@ -386,12 +449,14 @@ Block * addBlockToBlockchain(Block *shBlock, NetData *net){
         for(j = 0; j < net->total_miners; j++) shBlock[i].wallets[j] = shBlock[i-1].wallets[j];
         sem_post(&net->blockShMemory_mutex);
 
+        /*Devuelve el puntero al nuevo bloque creado*/
         return &shBlock[i];
     }
 
 }
 
-Block * updateBlock(Block *shBlock){
+/*Cumple el mismo proposito que la funcion anterior pero para mineros que perdieron la ronda*/
+Block * updateBlock(Block *shBlock){ 
     
     int fd, i;
     struct stat statbuf;
@@ -408,12 +473,14 @@ Block * updateBlock(Block *shBlock){
         if (shBlock) munmap(shBlock, statbuf.st_size);
 
         if ((shBlock = (Block*)mmap(NULL, statbuf.st_size , PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
-                perror("mmap");
-                exit(EXIT_FAILURE);
+            perror("mmap");
+            close(fd);
+            exit(EXIT_FAILURE);
         }
         i = statbuf.st_size/sizeof(Block);
         close(fd);
         
+        /*En este caso es i-1 porque tiene en cuenta que se ha debido de ejecutar la funcion addblocktoblockchain previamente*/
         return &shBlock[i-1];
     }
 }
@@ -432,9 +499,43 @@ void addCoin(NetData *net, Block * shBlock){
 
 }
 
+void addBlockToSelfBlockchain(Block * blockchain, Block *shBlock, int pos){
+
+    blockchain[pos] = *shBlock;
+}
+
+void printBlockchainAtExit(Block *blockchain, NetData *net, int roundsDone){
+    int j, i;
+    FILE *f;
+    char str[30];
+    char path[30];
+
+    /*Construye el path al directorio en el que guardara el fichero*/
+    intToAscii(getpid(), str);
+    strcpy(path, "./blockchains/");
+    strcat(path, str);
+
+    f = fopen(path, "w");
+    if(!f){
+        printf("Failed to open file\n");
+        return;
+    } 
+
+    fprintf(f, "\nPRINTING BLOCKCHAIN\n");
+    for(i = 0; i < roundsDone; i++) {
+        fprintf(f, "Block number: %d; Target: %ld;    Solution: %ld\n", blockchain[i].id, blockchain[i].target, blockchain[i].solution);
+        for(j = 0; j < net->total_miners; j++) {
+            fprintf(f, "%d: %d;         ", j+1, blockchain[i].wallets[j]);
+        }
+        fprintf(f, "\n\n\n");
+    }
+
+    fclose(f);
+}
+
 int main(int argc, char *argv[]) {
     int i;
-    int aux;
+    int aux = 0;
     int activeMinersPos[MAX_MINERS];
     int roundCounter = 0, maxRounds, activeMiners, numVotes;
     pthread_t workers[MAX_WORKERS];
@@ -444,12 +545,21 @@ int main(int argc, char *argv[]) {
     Block *shBlock;
     sigset_t emptyMask;
     mqd_t minersQueue;
+    mqd_t monitorQueue;
+    Block blockchain[MAX_BLOCKS];
     struct mq_attr attributes = {
         .mq_flags = 0,
         .mq_maxmsg = MAX_WORKERS,
         .mq_curmsgs = 0,
         .mq_msgsize = sizeof(int)
     };
+    struct mq_attr monitorAttributes = {
+        .mq_flags = 0,
+        .mq_maxmsg = MAX_BLOCKS_MONITOR,
+        .mq_curmsgs = 0,
+        .mq_msgsize = sizeof(Block)
+    };
+    int posBlockchain = 0;
 
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <NUM_WORKERS> <MAX_ROUNDS>\n", argv[0]);
@@ -462,8 +572,8 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
     maxRounds = atoi(argv[2]);
-    if(maxRounds <= 0){
-        fprintf(stderr, "The number of rounds should be one or more, Finishing program...\n");
+    if(maxRounds <= 0 || maxRounds > MAX_BLOCKS){
+        fprintf(stderr, "The number of rounds should be between one and %d, Finishing program...\n", MAX_BLOCKS);
         exit(EXIT_FAILURE);
     }
 
@@ -477,37 +587,52 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    monitorQueue = mq_open(MQ_MONITOR, O_CREAT | O_WRONLY , S_IRUSR | S_IWUSR, &monitorAttributes);
+    if(monitorQueue == (mqd_t)-1) {
+        perror("monitorQueue");
+        mq_close(minersQueue);
+        exit(EXIT_FAILURE);
+    }
+
     /*opens and maps netShememory*/
     net = open_netShmemory(&isFirst);
     if(!net){
         fprintf(stderr, "Failed to open the shared net\n");
+        mq_close(minersQueue);
+        mq_close(monitorQueue);
         exit(EXIT_FAILURE);
     }
     printf("Registering miner %d...\n", getpid());
-    sleep(2);
+    sleep(1);
     if(signUp(net) == ERR){
         fprintf(stderr, "Failed to register miner %d\n", getpid());
         munmap(net, sizeof(NetData));
+        mq_close(minersQueue);
+        mq_close(monitorQueue);
+        exit(EXIT_FAILURE);
     }
     printf("Miner registered.\n");
     printf("Printing miners pid list...\n");
+    sleep(1);
     for(i = 0; i < net->total_miners; i++){
         printf("%d\n", net->miners_pid[i]);
     }
-    sleep(2);
+    sleep(1);
 
     /*opens and maps the shared block*/
     shBlock = open_sharedBlockMemory();
     if(!shBlock){
         fprintf(stderr, "Failed to open the shared block\n");
         munmap(net, sizeof(NetData));
+        mq_close(minersQueue);
+        mq_close(monitorQueue);
         exit(EXIT_FAILURE);
     }
     
     
     if(isFirst){
         printf("The miner %d is the first in the net. Creating first block with random target...\n", getpid());
-        sleep(2);
+        sleep(1);
         srand(time(NULL));
 
         sem_wait(&net->blockShMemory_mutex);
@@ -520,8 +645,10 @@ int main(int argc, char *argv[]) {
     
 
     printf("The miner %d is starting its rounds... \n", getpid());
-    while(roundCounter < maxRounds){
-        /*se prepara una ronda*/
+    sleep(1);
+    while(roundCounter < maxRounds && sigint_received == 0){
+
+        blocksigint();
         if(!net->roundInProgress){
             sem_wait(&net->netShMemory_mutex);
             net->roundInProgress = 1;
@@ -529,7 +656,6 @@ int main(int argc, char *argv[]) {
         }
         
         printf("Target for the round %d: %ld\n",  roundCounter+1, shBlock->target);
-        sleep(2);
         /*carga la info de cada trabajador*/
         /*lanza el número de trabajadores especificados*/
         sigusr2_received = 0;
@@ -537,7 +663,7 @@ int main(int argc, char *argv[]) {
 
 
         printf("Sending workers to mine the solution...\n");
-        sleep(2);
+        sleep(1);
         for (i = 0; i < numWorkers; i++){
             info[i].numWorkers = numWorkers;
             info[i].numThread = i;
@@ -545,11 +671,14 @@ int main(int argc, char *argv[]) {
             info[i].net = net;
             printf("Sending worker Nº %d...\n", i+1);
             if(pthread_create(&workers[i], NULL, worker, &info[i]) != 0){
-                fprintf(stderr, "Manito fracase creando hilos...\n");
+                fprintf(stderr, "Failed creating a worker...\n");
+                munmap(net, sizeof(NetData));
+                munmap(shBlock, sizeof(Block));
+                mq_close(minersQueue);
+                mq_close(monitorQueue);
                 exit(EXIT_FAILURE);
             }
         }
-        sleep(2);
         printf("All workers were sent. Main thread will now wait for the results...\n");
         while(!sigusr2_received && !sigusr1_received) sigsuspend(&emptyMask);
 
@@ -557,10 +686,11 @@ int main(int argc, char *argv[]) {
         else  printf("\n\nROUND WON\n\n");
 
         for(i = 0; i < numWorkers; i++){
-            pthread_join(workers[1], NULL);
+            pthread_join(workers[i], NULL);
         }
+        sleep(1);
         printf("End of the round...\n");
-        sleep(2);
+        sleep(1);
         roundCounter++;   
         
 
@@ -570,19 +700,18 @@ int main(int argc, char *argv[]) {
         /*Notifica SIGUSR1 a los mineros activos para indicar que ya fueron seteados los campos y pueden votar*/
         /****************************************************************************************************/
             activeMiners = notifyActiveMiners(net, activeMinersPos);
-            sleep(2);
         /****************************************************************************************************/
 
 
         /*Se queda a la espera de que los otros mineros notifiquen que ya han votado*/
         /****************************************************************************************************/
+            sleep(1);
             numVotes = 0;
             printf("Waiting for other miners to vote...\n");
             while (numVotes != activeMiners - 1){
-                /*TODO: hacer algo con lo de aux xd*/
+
                 mq_receive(minersQueue, (char *)&aux, sizeof(int), NULL);
                 printf("Vote received\n");
-                sleep(1);
                 numVotes++;
                 printf("Votes %d/%d\n", numVotes, activeMiners - 1);
             }
@@ -591,6 +720,7 @@ int main(int argc, char *argv[]) {
         
         /*Hace el recuento de votos*/
         /****************************************************************************************************/
+            sleep(1);
             numVotes = 0;
             printf("Counting votes...\n");
             for(i = 0; i < activeMiners ; i++){
@@ -600,48 +730,60 @@ int main(int argc, char *argv[]) {
                 }
             }
             printf("Votes: %d\n", numVotes);
-            sleep(2);
+            sleep(1);
         /****************************************************************************************************/
             
 
-        /*Decide si el bloque es valido o no*/   
+        /*Decide si el bloque es valido o no y actua en consecuencia*/   
         /****************************************************************************************************/    
+            sleep(1);
+            printf("Deciding if the block is valid...\n");
             if(numVotes >= (activeMiners - 1)/2){
                 sem_wait(&net->blockShMemory_mutex);
                 shBlock->is_valid = 1;
-                printf("Validated block:\nId: %d\nTarget: %ld\nSolution: %ld\nPrev(&): %p\n", 
-                        shBlock->id, shBlock->target, shBlock->solution, (void*)shBlock->prev);
                 sem_post(&net->blockShMemory_mutex);
-                addCoin(net, shBlock); 
+                addCoin(net, shBlock);
+                addBlockToSelfBlockchain(blockchain, shBlock, posBlockchain);
+                posBlockchain++;
+                if(net->monitor_pid != NO_MONITOR){
+                    printf("Sending info to the monitor\n");
+                    if(mq_send(monitorQueue, (char*)shBlock, sizeof(Block), 2) == -1){
+                        perror("monitorSend");
+                    }
+                } 
                 shBlock = addBlockToBlockchain(shBlock, net);
-                printf("New block:\nId: %d\nTarget: %ld\nPrev(&): %p\n", 
-                        shBlock->id, shBlock->target, (void*)shBlock->prev);
+                if(!shBlock){
+                    munmap(net, sizeof(NetData));
+                    munmap(shBlock, sizeof(Block));
+                    mq_close(minersQueue);
+                    mq_close(monitorQueue);
+                    exit(EXIT_FAILURE);
+                }
             }
             else{
                 sem_wait(&net->blockShMemory_mutex);
                 shBlock->is_valid = 0;
                 sem_post(&net->blockShMemory_mutex);
-                printf("Block is not valid\n");
             }
-            sleep(2);
+            sleep(1);
         /****************************************************************************************************/
         
         
         /*Notifica a los otros mineros activos que ya se sabe si el bloque es valido*/
         /****************************************************************************************************/
             notifyActiveMiners(net, NULL);
-            sleep(2);
         /****************************************************************************************************/
         
 
         /*Avisa a los que estaban en lista de espera que ya acabo la ronda,*/
         /****************************************************************************************************/
+            sleep(1);
+            printf("Notifying miners in waiting list...\n");
             sem_wait(&net->netShMemory_mutex);
             net->last_winner = getpid();
             net->roundInProgress = 0;
             for(i = 0; i < net->numWaiting_list; i++){
-                printf("Mandando señal a %d\n", net->waiting_list[i]);
-                kill(net->waiting_list[i], SIGUSR1);
+                if(kill(net->waiting_list[i], SIGUSR1)) perror("kill_toWaitingList");
                 net->waiting_list[i] = -1;
             }
             for(i = 0; i < net->numWaiting_list; i++){
@@ -664,7 +806,8 @@ int main(int argc, char *argv[]) {
         else{
         /*Entra en espera no activa hasta que el ganador notifique que se ha escrito la solucion*/
         /****************************************************************************************************/
-            printf("Waiting for the winner to signal the rest of miners can vote\n\n");
+            sleep(1);
+            printf("Waiting for the winner to signal the rest of miners can vote\n");
             while(!sigusr1_received) sigsuspend(&emptyMask); /*espera a que el ganador le mande sigusr1 para que se contabilice su voto*/
             sigusr1_received = 0;
         /****************************************************************************************************/
@@ -672,23 +815,33 @@ int main(int argc, char *argv[]) {
 
         /*Vota si la solución propuesta es válida o no*/   
         /****************************************************************************************************/
+            sleep(1);
             printf("Voting...\n");
             vote(net, shBlock);
-            /*TODO: hacer algo con lo de aux xd*/
-            sleep(2);
+
             printf("Notifying the winner the vote has been casted...\n");
-            mq_send(minersQueue, (char *)&aux, sizeof(int), 0);
-            sleep(2);
+            if(mq_send(minersQueue, (char *)&aux, sizeof(int), 0) == -1){
+                perror("mq_send minersQueue");
+            }
+            sleep(1);
         /****************************************************************************************************/
 
 
         /*Entra en espera no activa hasta que se sepa si el bloque es valido o no*/
         /****************************************************************************************************/
+            sleep(1);
             printf("Waiting for the winner to decide if the solution is valid or not...\n");
             while(!sigusr1_received) sigsuspend(&emptyMask); /*esperan a que el ganador comunica si el bloque es valido*/
             sigusr1_received = 0;
             if(shBlock->is_valid){
-                /*TODO: añadir al blockchain de cada minero el bloque creado*/
+                if(net->monitor_pid != NO_MONITOR){
+                    printf("Sending info to the monitor\n");
+                    if(mq_send(monitorQueue, (char*)shBlock, sizeof(Block), 1) == -1){
+                        perror("monitorSend");
+                    }
+                }
+                addBlockToSelfBlockchain(blockchain, shBlock, posBlockchain);
+                posBlockchain++;
                 shBlock = updateBlock(shBlock);    
                 printf("The block is valid!\n");
             }
@@ -697,16 +850,23 @@ int main(int argc, char *argv[]) {
 
         /*Entra en espera no activa hasta que se sepa si la ronda ha terminado*/
         /****************************************************************************************************/
+            sleep(1);
             printf("Waiting for the winner to notify the round is over\n");
             while(!sigusr1_received) sigsuspend(&emptyMask); /*esperan a que el ganador comunica si el bloque es valido*/
         /****************************************************************************************************/     
         }
+        unblocksigint();
     }
 
-    fprintf(stdout, "Max rounds reached, finishing program...\n");
+    printBlockchainAtExit(blockchain, net, posBlockchain);
+    if(sigint_received) printf("Sigint received, finishing program...\n");
+    else printf("Max rounds reached, finishing program...\n");
+
+    munmap(net, sizeof(NetData));
+    munmap(shBlock, sizeof(Block));
+    mq_close(minersQueue);
+    mq_close(monitorQueue);
     exit(EXIT_SUCCESS); 
-        
-    
 }
 
 
