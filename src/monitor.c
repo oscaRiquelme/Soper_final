@@ -27,13 +27,22 @@ Block blockchain;
 int miners;
 char file[30];
 
+void freeBlockchain(Block * b){
+
+    Block *aux;
+
+    while(b != NULL){
+        aux = b;
+        b = b->next;
+        free(aux);
+    }
+}
 
 void copyBlock(Block * dest, Block * src, int miners){
 
     Block * aux = dest;
 
     while(aux->next!=NULL) aux = aux->next;
-    printf("4\n");
     int j;
     aux->id = src->id;
     aux->target = src->target;
@@ -225,7 +234,6 @@ int main(int argc, char* argv[]){
 
     else if(pid){ /*Padre*/
         close(pipe_fd[0]);
-        printf("%d\n", pid);
         for(j = 0; j < MAX_BLOCKS_MONITOR; j++) buffer[j].id = -1;
         while(!sigint_received){
             blockSig(SIGINT);
@@ -299,6 +307,14 @@ int main(int argc, char* argv[]){
             }while(nbytes != sizeof(Block) && !sigusr1_received);
             
             bc_pointer->next = (Block*)malloc(sizeof(Block));
+            if(!bc_pointer->next){
+                close(pipe_fd[0]);
+                freeBlockchain(blockchain.next);
+                sem_close(sem);
+                munmap(net, sizeof(NetData));
+                exit(EXIT_FAILURE);
+            }
+            
             bc_pointer->next->next = NULL;
             copyBlock(&blockchain, &block, net->total_miners);
             bc_pointer = bc_pointer->next;
@@ -308,6 +324,7 @@ int main(int argc, char* argv[]){
         }
         close(pipe_fd[0]);
         munmap(net, sizeof(NetData));
+        freeBlockchain(blockchain.next);
         sem_close(sem);
         exit(EXIT_SUCCESS);
     }
