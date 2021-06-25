@@ -48,7 +48,6 @@ Block * updateBlock(Block *shBlock);
 /******************************************************************/
 
 
-
 long int simple_hash(long int number) {
     long int result = (number * BIG_X + BIG_Y) % PRIME;
     return result;
@@ -142,7 +141,6 @@ NetData* map_netShmemory(int fd){
     }
     return data;
 }
-
 sigset_t proc_handlers(){
 
     struct sigaction action;
